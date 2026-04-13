@@ -1,0 +1,20 @@
+{
+  "name": "xiaohongshu-dm-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Monitor Xiaohongshu personal account DMs, generate AI replies, and notify via Feishu.",
+  "scripts": {
+    "login": "node src/login.js",
+    "start": "node src/index.js",
+    "debug:selectors": "node src/debug-selectors.js",
+    "test": "node --test --test-concurrency=1 --test-isolation=none"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "playwright": "^1.55.0"
+  }
+}
