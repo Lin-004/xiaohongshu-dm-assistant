@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   getConversationStateKey,
   getMessageHash,
+  getMessageIncrement,
   shouldRequireManualReview
 } from '../src/policy.js';
 
@@ -48,11 +49,48 @@ test('cooldown blocks repeated auto replies', () => {
   assert.match(reason, /冷却时间/);
 });
 
+test('getMessageIncrement returns all messages on first handle', () => {
+  const increment = getMessageIncrement(
+    {
+      history: ['你好', '在吗']
+    },
+    null
+  );
+
+  assert.deepEqual(increment, ['你好', '在吗']);
+});
+
+test('getMessageIncrement returns appended suffix when history extends', () => {
+  const increment = getMessageIncrement(
+    {
+      history: ['你好', '资料发你了', '收到', '还有吗']
+    },
+    {
+      lastContextMessages: ['你好', '资料发你了']
+    }
+  );
+
+  assert.deepEqual(increment, ['收到', '还有吗']);
+});
+
+test('getMessageIncrement returns empty array when no new messages exist', () => {
+  const increment = getMessageIncrement(
+    {
+      history: ['你好', '在吗']
+    },
+    {
+      lastContextMessages: ['你好', '在吗']
+    }
+  );
+
+  assert.deepEqual(increment, []);
+});
+
 test('conversation key and message hash are stable', () => {
   const stateKeyA = getConversationStateKey('张三', '你好');
   const stateKeyB = getConversationStateKey('张三', '你好');
-  const messageHashA = getMessageHash('你好', ['你好', '请问怎么买']);
-  const messageHashB = getMessageHash('你好', ['你好', '请问怎么买']);
+  const messageHashA = getMessageHash('你好', ['你好', '请问怎么卖']);
+  const messageHashB = getMessageHash('你好', ['你好', '请问怎么卖']);
 
   assert.equal(stateKeyA, stateKeyB);
   assert.equal(messageHashA, messageHashB);
