@@ -119,7 +119,9 @@ async function handleConversation(
     conversation.text
   );
   const record = state.conversations[conversationStateKey];
-  const incrementMessages = getMessageIncrement(context, record);
+  const incrementMessages = getMessageIncrement(context, record, {
+    unreadCount: conversation.unreadCount
+  });
 
   if (!incrementMessages.length) {
     logger.info(`候选会话没有新增消息，跳过: ${context.title}`);

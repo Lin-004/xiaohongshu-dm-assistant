@@ -28,16 +28,17 @@ export function getMessageHash(latestMessage, history = []) {
   return hashContent(`${latestMessage || ''}|${history.slice(-2).join('|')}`);
 }
 
-export function getMessageIncrement(context, record) {
+export function getMessageIncrement(context, record, options = {}) {
   const currentHistory = normalizeMessages(context?.history || []);
   const previousHistory = normalizeMessages(record?.lastContextMessages || []);
+  const unreadCount = normalizeUnreadCount(options.unreadCount);
 
   if (!currentHistory.length) {
     return [];
   }
 
   if (!previousHistory.length) {
-    return currentHistory;
+    return limitIncrementByUnreadCount(currentHistory, unreadCount);
   }
 
   const overlap = findTailOverlap(previousHistory, currentHistory);
@@ -45,7 +46,7 @@ export function getMessageIncrement(context, record) {
     return currentHistory.slice(overlap);
   }
 
-  return currentHistory;
+  return limitIncrementByUnreadCount(currentHistory, unreadCount);
 }
 
 export function shouldRequireManualReview(
@@ -107,4 +108,17 @@ function arraysEqual(left, right) {
 
 function dedupeKeywords(keywords) {
   return [...new Set(keywords.map((item) => String(item).trim()).filter(Boolean))];
+}
+
+function normalizeUnreadCount(value) {
+  const count = Number(value);
+  return Number.isInteger(count) && count > 0 ? count : null;
+}
+
+function limitIncrementByUnreadCount(messages, unreadCount) {
+  if (!unreadCount || messages.length <= unreadCount) {
+    return messages;
+  }
+
+  return messages.slice(-unreadCount);
 }

@@ -134,7 +134,9 @@ async function ensureConversationListPage(runtime) {
 }
 
 async function confirmConversationDetailPage(runtime, conversation) {
-  const expectedTitle = normalizeText(conversation.title || conversation.text);
+  const expectedTitle = normalizeConversationTitleForMatch(
+    conversation.title || conversation.text
+  );
   let lastState = null;
 
   for (let attempt = 0; attempt < detailConfirmAttempts; attempt += 1) {
@@ -165,7 +167,9 @@ async function confirmConversationDetailPage(runtime, conversation) {
     }
 
     if (pageState.state === 'conversation_list') {
-      await tap(runtime, conversation.bounds.centerX, conversation.bounds.centerY);
+      const latestBounds = findConversationBounds(xml, conversation, expectedTitle);
+      const targetBounds = latestBounds || conversation.bounds;
+      await tap(runtime, targetBounds.centerX, targetBounds.centerY);
     }
   }
 
@@ -177,12 +181,40 @@ async function confirmConversationDetailPage(runtime, conversation) {
 }
 
 function isExpectedConversationTitle(expectedTitle, actualTitle) {
-  const expected = normalizeText(expectedTitle);
-  const actual = normalizeText(actualTitle);
+  const expected = normalizeConversationTitleForMatch(expectedTitle);
+  const actual = normalizeConversationTitleForMatch(actualTitle);
 
   if (!expected || !actual) {
     return false;
   }
 
   return actual.includes(expected) || expected.includes(actual);
+}
+
+function findConversationBounds(xml, conversation, expectedTitle) {
+  const conversations = extractConversationSummaries(xml);
+  const expected = expectedTitle || normalizeConversationTitleForMatch(conversation.title);
+  const expectedText = normalizeConversationTitleForMatch(conversation.text);
+
+  const matchedConversation = conversations.find((item) => {
+    const itemTitle = normalizeConversationTitleForMatch(item.title);
+    const itemText = normalizeConversationTitleForMatch(item.text);
+
+    return (
+      (expected && (itemTitle.includes(expected) || expected.includes(itemTitle))) ||
+      (expectedText &&
+        (itemText.includes(expectedText) || expectedText.includes(itemText)))
+    );
+  });
+
+  return matchedConversation?.bounds || null;
+}
+
+function normalizeConversationTitleForMatch(value) {
+  return normalizeText(value)
+    .normalize('NFKC')
+    .replace(/&#(x?[0-9a-fA-F]+);/g, '')
+    .replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .trim();
 }

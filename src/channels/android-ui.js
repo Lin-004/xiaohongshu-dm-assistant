@@ -31,12 +31,15 @@ export function extractConversationSummaries(xml) {
         return null;
       }
 
+      const unreadDetails = inferUnreadDetails(row, textNodes);
+
       return {
         id: `android-${index}-${row.bounds.top}`,
         index,
         text: parts.join(' '),
         title: title || summary,
-        unread: inferUnread(row, textNodes),
+        unread: unreadDetails.unread,
+        unreadCount: unreadDetails.unreadCount,
         bounds: row.bounds
       };
     })
@@ -176,7 +179,21 @@ function decodeXml(value) {
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
+    .replace(/&amp;/g, '&')
+    .replace(/&#(x?[0-9a-fA-F]+);/g, (_match, code) => {
+      const isHex = String(code).toLowerCase().startsWith('x');
+      const parsed = Number.parseInt(isHex ? String(code).slice(1) : code, isHex ? 16 : 10);
+
+      if (!Number.isFinite(parsed)) {
+        return '';
+      }
+
+      try {
+        return String.fromCodePoint(parsed);
+      } catch {
+        return '';
+      }
+    });
 }
 
 function parseBounds(value) {
@@ -328,10 +345,16 @@ function inferConversationRowTitle(textNodes) {
   const candidates = textNodes
     .filter((item) => looksLikeConversationTitle(item.text))
     .filter((item) => item.bounds.left < 900)
-    .filter((item) => item.bounds.top - firstNode.bounds.top < 120)
-    .sort(compareTitleCandidates);
+    .sort(compareTextNodes);
 
-  return candidates[0]?.text || '';
+  const sameLineCandidates = candidates.filter(
+    (item) => item.bounds.top - firstNode.bounds.top < 56
+  );
+  const titleCandidates = sameLineCandidates.length
+    ? sameLineCandidates
+    : candidates;
+
+  return titleCandidates.sort(compareTitleCandidates)[0]?.text || '';
 }
 
 function compareTitleCandidates(left, right) {
@@ -395,9 +418,19 @@ function inferConversationRowSummary(textNodes, title) {
   return summaryCandidate?.text || '';
 }
 
-function inferUnread(node, textNodes) {
-  if (textNodes.some((item) => isUnreadCount(item.text) || item.text.includes('未读'))) {
-    return true;
+function inferUnreadDetails(node, textNodes) {
+  const textUnreadCount = textNodes
+    .map((item) => parseUnreadCount(item.text))
+    .find((value) => value !== null);
+
+  if (
+    textUnreadCount !== undefined ||
+    textNodes.some((item) => item.text.includes('未读'))
+  ) {
+    return {
+      unread: true,
+      unreadCount: textUnreadCount ?? null
+    };
   }
 
   const queue = [node];
@@ -405,14 +438,22 @@ function inferUnread(node, textNodes) {
   while (queue.length) {
     const current = queue.shift();
     const token = getDisplayText(current);
-    if (token && (/^\d+$/.test(token) || token.includes('未读') || token.includes('new'))) {
-      return true;
+    const unreadCount = parseUnreadCount(token);
+
+    if (unreadCount !== null || token.includes('未读') || token.includes('new')) {
+      return {
+        unread: true,
+        unreadCount
+      };
     }
 
     queue.push(...current.children);
   }
 
-  return false;
+  return {
+    unread: false,
+    unreadCount: null
+  };
 }
 
 function inferConversationTitle(tree) {
@@ -522,7 +563,23 @@ function looksLikeMessageSummary(text) {
 }
 
 function isUnreadCount(text) {
-  return /^\(?\d+\)?$/.test(text) || /^\d+条未读$/.test(text);
+  return parseUnreadCount(text) !== null;
+}
+
+function parseUnreadCount(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return null;
+  }
+
+  const countMatch =
+    normalized.match(/^\(?(\d+)\)?$/) || normalized.match(/^(\d+)条未读$/);
+  if (!countMatch) {
+    return null;
+  }
+
+  const count = Number(countMatch[1]);
+  return Number.isFinite(count) ? count : null;
 }
 
 function isOnlineStatus(text) {

@@ -35,6 +35,27 @@ const conversationDetailXml = `<?xml version="1.0" encoding="UTF-8"?>
   </node>
 </hierarchy>`;
 
+const ambiguousConversationListXml = `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" bounds="[0,0][1080,2400]">
+    <node index="0" text="消息" bounds="[0,0][1080,120]"></node>
+    <node index="1" text="" clickable="true" bounds="[0,180][1080,360]">
+      <node index="0" text="小红薯69816158" bounds="[48,210][420,250]"></node>
+      <node index="1" text="最后一条" bounds="[48,272][280,320]"></node>
+      <node index="2" text="2" bounds="[980,230][1030,280]"></node>
+    </node>
+  </node>
+</hierarchy>`;
+
+const emojiConversationDetailXml = `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" bounds="[0,0][1080,2400]">
+    <node index="0" text="A小邱&#128536;" bounds="[320,78][760,148]"></node>
+    <node index="1" text="你好呀" bounds="[120,520][320,580]"></node>
+    <node index="2" text="发消息…" bounds="[930,2240][1040,2320]"></node>
+  </node>
+</hierarchy>`;
+
 const blockedPopupXml = `<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy rotation="0">
   <node index="0" text="" bounds="[0,0][1080,2400]">
@@ -68,7 +89,17 @@ test('extractConversationSummaries finds conversation rows and unread state', ()
   assert.equal(conversations.length, 2);
   assert.equal(conversations[0].title, '品牌方A');
   assert.equal(conversations[0].unread, true);
+  assert.equal(conversations[0].unreadCount, 1);
   assert.equal(conversations[1].unread, false);
+  assert.equal(conversations[1].unreadCount, null);
+});
+
+test('extractConversationSummaries prefers top-line title over last-message summary', () => {
+  const conversations = extractConversationSummaries(ambiguousConversationListXml);
+
+  assert.equal(conversations.length, 1);
+  assert.equal(conversations[0].title, '小红薯69816158');
+  assert.equal(conversations[0].unreadCount, 2);
 });
 
 test('extractConversationContext reads title and recent message history', () => {
@@ -77,6 +108,12 @@ test('extractConversationContext reads title and recent message history', () => 
   assert.equal(context.title, '品牌方A');
   assert.deepEqual(context.history, ['你好', '想合作一个视频']);
   assert.equal(context.latestMessage, '想合作一个视频');
+});
+
+test('extractConversationContext decodes numeric entities in conversation title', () => {
+  const context = extractConversationContext(emojiConversationDetailXml, 8);
+
+  assert.equal(context.title, 'A小邱😘');
 });
 
 test('summarizeUiTexts exposes visible text snippets for dump inspection', () => {

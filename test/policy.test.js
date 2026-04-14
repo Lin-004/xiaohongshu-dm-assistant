@@ -60,6 +60,20 @@ test('getMessageIncrement returns all messages on first handle', () => {
   assert.deepEqual(increment, ['你好', '在吗']);
 });
 
+test('getMessageIncrement limits first-handle increment by unread count', () => {
+  const increment = getMessageIncrement(
+    {
+      history: ['hello', 'hi', '怎么不回我信息', '刚刚', '测试测试']
+    },
+    null,
+    {
+      unreadCount: 1
+    }
+  );
+
+  assert.deepEqual(increment, ['测试测试']);
+});
+
 test('getMessageIncrement returns appended suffix when history extends', () => {
   const increment = getMessageIncrement(
     {

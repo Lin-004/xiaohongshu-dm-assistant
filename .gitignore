@@ -4,3 +4,8 @@ node_modules/
 playwright-report/
 test-results/
 *.log
+.codex-skill-build/
+docs/backlog-v1.md
+docs/boss-weekly-brief-v1.md
+docs/prd-xiaohongshu-dm-assistant-v1.md
+docs/project-handoff-v1.md
