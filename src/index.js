@@ -1,3 +1,4 @@
+import { pathToFileURL } from 'node:url';
 import { getChannel } from './channel.js';
 import { config, validateRuntimeConfig } from './config.js';
 import { generateReply } from './llm.js';
@@ -9,12 +10,13 @@ import {
 import {
   getConversationStateKey,
   getMessageHash,
+  getMessageIncrement,
   shouldRequireManualReview
 } from './policy.js';
 import { loadState, saveState } from './state-store.js';
 import { nowIso, sleep } from './utils.js';
 
-async function main() {
+export async function main() {
   const configErrors = validateRuntimeConfig();
   if (configErrors.length) {
     throw new Error(`配置缺失: ${configErrors.join('，')}`);
@@ -68,113 +70,179 @@ async function main() {
   logger.info('监听器已退出');
 }
 
-async function monitorOnce(channel, runtime, state) {
-  const conversations = await channel.listUnreadConversations(runtime);
-  const unreadConversations = conversations.filter((item) => item.unread);
+export async function monitorOnce(channel, runtime, state) {
   const canSendReplies = channel.capabilities?.sendReply !== false;
+  let processedCount = 0;
 
-  if (!unreadConversations.length) {
-    logger.info('本轮没有发现未读私信');
-    return;
-  }
+  while (true) {
+    const conversations = await channel.listUnreadConversations(runtime);
+    const unreadConversations = conversations.filter((item) => item.unread);
+    const conversation = unreadConversations[0];
 
-  logger.info(`发现 ${unreadConversations.length} 个未读会话`);
-
-  for (const conversation of unreadConversations) {
-    await channel.openConversation(runtime, conversation);
-    const context = await channel.readConversationContext(runtime);
-
-    if (!context.latestMessage) {
-      logger.warn(`跳过空消息会话: ${conversation.text}`);
-      continue;
+    if (!conversation) {
+      if (processedCount === 0) {
+        logger.info('本轮没有发现未读私信');
+      } else {
+        logger.info(`本轮处理完成，共处理 ${processedCount} 个候选会话`);
+      }
+      return;
     }
 
-    const conversationStateKey = getConversationStateKey(
-      context.title,
-      conversation.text
-    );
-    const messageHash = getMessageHash(context.latestMessage, context.history);
-    const record = state.conversations[conversationStateKey];
-
-    try {
-      if (record?.lastHandledMessageHash === messageHash) {
-        logger.info(`消息已处理，跳过: ${context.title}`);
-        continue;
-      }
-
-      const manualReason = shouldRequireManualReview(context, record);
-      const reply = await generateReply({
-        conversationTitle: context.title,
-        latestMessage: context.latestMessage,
-        history: context.history
-      });
-
-      if (manualReason) {
-        logger.warn(`转人工检查: ${context.title} - ${manualReason}`);
-        await safeNotify(
-          formatConversationNotification({
-            conversationTitle: context.title,
-            latestMessage: context.latestMessage,
-            reply,
-            outcome: '转人工',
-            reason: manualReason
-          }),
-          '人工转交通知'
-        );
-
-        state.conversations[conversationStateKey] = {
-          lastHandledMessageHash: messageHash,
-          lastHandledAt: nowIso(),
-          lastReplyText: reply,
-          mode: 'manual-review'
-        };
-        continue;
-      }
-
-      let delivery = '仅生成';
-      let mode = 'draft-only';
-
-      if (config.xiaohongshu.autoSendReply && canSendReplies) {
-        await channel.sendReply(runtime, reply);
-        delivery = '已自动发送';
-        mode = 'auto-send';
-      }
-
-      await safeNotify(
-        formatConversationNotification({
-          conversationTitle: context.title,
-          latestMessage: context.latestMessage,
-          reply,
-          outcome: delivery
-        }),
-        '正常回复通知'
-      );
-
-      logger.info(`${delivery}: ${context.title}`);
-      state.conversations[conversationStateKey] = {
-        lastHandledMessageHash: messageHash,
-        lastHandledAt: nowIso(),
-        lastReplyText: reply,
-        mode
-      };
-    } catch (error) {
-      logger.error(`处理会话失败: ${context.title} - ${error.message}`);
-      await safeNotify(
-        [
-          '小红书私信处理异常',
-          `会话: ${context.title}`,
-          `用户消息: ${context.latestMessage}`,
-          `错误: ${error.message}`
-        ].join('\n'),
-        '单会话异常通知'
-      );
-    } finally {
-      await saveState(state);
+    if (processedCount === 0) {
+      logger.info(`发现 ${unreadConversations.length} 个未读会话`);
+    } else {
+      logger.info(`重新抓取列表后，剩余 ${unreadConversations.length} 个未读会话`);
     }
+
+    await handleConversation(channel, runtime, state, conversation, canSendReplies);
+    processedCount += 1;
   }
 }
 
-main().catch((error) => {
-  logger.error(error.message);
-  process.exitCode = 1;
-});
+async function handleConversation(
+  channel,
+  runtime,
+  state,
+  conversation,
+  canSendReplies
+) {
+  await channel.openConversation(runtime, conversation);
+  const context = await channel.readConversationContext(runtime);
+
+  if (!context.latestMessage) {
+    logger.warn(`跳过空消息会话: ${conversation.text}`);
+    return;
+  }
+
+  const conversationStateKey = getConversationStateKey(
+    context.title,
+    conversation.text
+  );
+  const record = state.conversations[conversationStateKey];
+  const incrementMessages = getMessageIncrement(context, record);
+
+  if (!incrementMessages.length) {
+    logger.info(`候选会话没有新增消息，跳过: ${context.title}`);
+    state.conversations[conversationStateKey] = buildConversationRecord({
+      record,
+      context,
+      mode: record?.mode || 'draft-only'
+    });
+    return;
+  }
+
+  const aggregatedMessage = incrementMessages.join('\n');
+  const replyContext = {
+    ...context,
+    latestMessage: aggregatedMessage
+  };
+  const messageHash = getMessageHash(aggregatedMessage, incrementMessages);
+
+  try {
+    if (record?.lastHandledMessageHash === messageHash) {
+      logger.info(`消息增量已处理，跳过: ${context.title}`);
+      state.conversations[conversationStateKey] = buildConversationRecord({
+        record,
+        context,
+        messageHash,
+        mode: record?.mode || 'draft-only'
+      });
+      return;
+    }
+
+    const manualReason = shouldRequireManualReview(replyContext, record);
+    const reply = await generateReply({
+      conversationTitle: replyContext.title,
+      latestMessage: replyContext.latestMessage,
+      history: replyContext.history
+    });
+
+    if (manualReason) {
+      logger.warn(`转人工检查: ${context.title} - ${manualReason}`);
+      await safeNotify(
+        formatConversationNotification({
+          conversationTitle: replyContext.title,
+          latestMessage: replyContext.latestMessage,
+          reply,
+          outcome: '转人工',
+          reason: manualReason
+        }),
+        '人工转交通知'
+      );
+
+      state.conversations[conversationStateKey] = buildConversationRecord({
+        record,
+        context,
+        messageHash,
+        reply,
+        mode: 'manual-review'
+      });
+      return;
+    }
+
+    let delivery = '仅生成';
+    let mode = 'draft-only';
+
+    if (config.xiaohongshu.autoSendReply && canSendReplies) {
+      await channel.sendReply(runtime, reply);
+      delivery = '已自动发送';
+      mode = 'auto-send';
+    }
+
+    await safeNotify(
+      formatConversationNotification({
+        conversationTitle: replyContext.title,
+        latestMessage: replyContext.latestMessage,
+        reply,
+        outcome: delivery
+      }),
+      '正常回复通知'
+    );
+
+    logger.info(`${delivery}: ${context.title}`);
+    state.conversations[conversationStateKey] = buildConversationRecord({
+      record,
+      context,
+      messageHash,
+      reply,
+      mode
+    });
+  } catch (error) {
+    logger.error(`处理会话失败: ${context.title} - ${error.message}`);
+    await safeNotify(
+      [
+        '小红书私信处理异常',
+        `会话: ${context.title}`,
+        `用户消息: ${aggregatedMessage}`,
+        `错误: ${error.message}`
+      ].join('\n'),
+      '单会话异常通知'
+    );
+  } finally {
+    await saveState(state);
+  }
+}
+
+function buildConversationRecord({
+  record,
+  context,
+  messageHash,
+  reply,
+  mode
+}) {
+  return {
+    ...record,
+    lastHandledMessageHash: messageHash || record?.lastHandledMessageHash || '',
+    lastHandledAt: nowIso(),
+    lastReplyText: reply ?? record?.lastReplyText ?? '',
+    lastContextMessages: [...(context.history || [])],
+    mode
+  };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    logger.error(error.message);
+    process.exitCode = 1;
+  });
+}

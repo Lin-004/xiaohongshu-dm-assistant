@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { hashContent, hasKeyword, minutesBetween } from './utils.js';
+import { hashContent, hasKeyword, minutesBetween, normalizeText } from './utils.js';
 
 const defaultRiskGroups = {
   business: ['合作', '商务', '联名', '置换', '达人', '投放'],
@@ -28,7 +28,31 @@ export function getMessageHash(latestMessage, history = []) {
   return hashContent(`${latestMessage || ''}|${history.slice(-2).join('|')}`);
 }
 
-export function shouldRequireManualReview(context, record, now = new Date().toISOString()) {
+export function getMessageIncrement(context, record) {
+  const currentHistory = normalizeMessages(context?.history || []);
+  const previousHistory = normalizeMessages(record?.lastContextMessages || []);
+
+  if (!currentHistory.length) {
+    return [];
+  }
+
+  if (!previousHistory.length) {
+    return currentHistory;
+  }
+
+  const overlap = findTailOverlap(previousHistory, currentHistory);
+  if (overlap > 0) {
+    return currentHistory.slice(overlap);
+  }
+
+  return currentHistory;
+}
+
+export function shouldRequireManualReview(
+  context,
+  record,
+  now = new Date().toISOString()
+) {
   const haystack = [context.title, context.latestMessage, ...(context.history || [])]
     .filter(Boolean)
     .join('\n');
@@ -52,6 +76,33 @@ export function shouldRequireManualReview(context, record, now = new Date().toIS
   }
 
   return null;
+}
+
+function normalizeMessages(messages) {
+  return messages.map((item) => normalizeText(item)).filter(Boolean);
+}
+
+function findTailOverlap(previousHistory, currentHistory) {
+  const maxOverlap = Math.min(previousHistory.length, currentHistory.length);
+
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    const previousTail = previousHistory.slice(-size);
+    const currentHead = currentHistory.slice(0, size);
+
+    if (arraysEqual(previousTail, currentHead)) {
+      return size;
+    }
+  }
+
+  return 0;
+}
+
+function arraysEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((item, index) => item === right[index]);
 }
 
 function dedupeKeywords(keywords) {

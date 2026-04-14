@@ -66,6 +66,30 @@ export function summarizeUiTexts(xml, limit = 80) {
     .slice(0, limit);
 }
 
+export function findBottomTabBounds(xml, label) {
+  const tree = parseUiHierarchy(xml);
+  const screen = getScreenBounds(tree);
+  const target = tree.descendants
+    .filter((node) => getDisplayText(node) === label)
+    .filter((node) => node.bounds.top > screen.height - 420)
+    .sort((left, right) => left.bounds.top - right.bounds.top)[0];
+
+  if (!target) {
+    return null;
+  }
+
+  let current = target;
+  while (current) {
+    if (current.attrs.clickable === 'true') {
+      return current.bounds;
+    }
+
+    current = current.parent;
+  }
+
+  return target.bounds.width > 0 ? target.bounds : null;
+}
+
 export function parseUiHierarchy(xml) {
   const root = {
     type: 'root',
@@ -146,6 +170,8 @@ function parseAttributes(token) {
 
 function decodeXml(value) {
   return String(value)
+    .replace(/&#10;/g, '\n')
+    .replace(/&#13;/g, '\r')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
@@ -220,7 +246,9 @@ function isConversationRowCandidate(node, screen) {
 
   return (
     textNodes.some((item) => looksLikeConversationTitle(item.text)) &&
-    !textNodes.every((item) => isSystemUpdateMarker(item.text) || isInputPlaceholder(item.text))
+    !textNodes.every(
+      (item) => isSystemUpdateMarker(item.text) || isInputPlaceholder(item.text)
+    )
   );
 }
 
@@ -292,10 +320,15 @@ function compareTextNodes(left, right) {
 }
 
 function inferConversationRowTitle(textNodes) {
+  const firstNode = textNodes[0];
+  if (!firstNode) {
+    return '';
+  }
+
   const candidates = textNodes
     .filter((item) => looksLikeConversationTitle(item.text))
     .filter((item) => item.bounds.left < 900)
-    .filter((item) => item.bounds.top - textNodes[0].bounds.top < 120)
+    .filter((item) => item.bounds.top - firstNode.bounds.top < 120)
     .sort(compareTitleCandidates);
 
   return candidates[0]?.text || '';
@@ -453,7 +486,6 @@ function sanitizeConversationTitle(text) {
   value = value.replace(/&#\d+;/g, '');
   value = value.replace(/^\[[^\]]+\]\s*/g, '');
   value = value.replace(/，{2,}/g, '，');
-  value = value.replace(/,\s*/g, '，');
 
   const segments = value
     .split('，')
@@ -475,15 +507,18 @@ function sanitizeConversationTitle(text) {
   }
 
   return value
-    .replace(/，?(今天在线|昨天|前天|刚刚在线|\d+分钟内在线|\d+小时内在线).*$/g, '')
-    .replace(/，?\d{2}月\d{2}号$/g, '')
-    .replace(/，?\d{4}年\d{2}月\d{2}号$/g, '')
+    .replace(
+      /，?(今天在线|昨天|前天|刚刚在线|\d+分钟内在线|\d+小时内在线).*$/g,
+      ''
+    )
+    .replace(/，?\d{2}月\d{2}号/g, '')
+    .replace(/，?\d{4}年\d{2}月\d{2}号/g, '')
     .replace(/^\[[^\]]+\]\s*/g, '')
     .trim();
 }
 
 function looksLikeMessageSummary(text) {
-  return text.length >= 8 || text.includes(':') || text.includes('：');
+  return text.length >= 8 || text.includes(':') || text.includes('，');
 }
 
 function isUnreadCount(text) {
@@ -491,7 +526,13 @@ function isUnreadCount(text) {
 }
 
 function isOnlineStatus(text) {
-  return /在线$/.test(text) || /人在线$/.test(text) || /分钟内在线$/.test(text) || /今天在线$/.test(text);
+  return (
+    /在线$/.test(text) ||
+    /人在线$/.test(text) ||
+    /分钟内在线$/.test(text) ||
+    /小时内在线$/.test(text) ||
+    /今天在线$/.test(text)
+  );
 }
 
 function isInputPlaceholder(text) {
@@ -499,7 +540,7 @@ function isInputPlaceholder(text) {
 }
 
 function isSystemUpdateMarker(text) {
-  return /^\d+条(新消息|更新)$/.test(text);
+  return /^(\d+条新消息|\d+条更新)$/.test(text);
 }
 
 function isActionButtonText(text) {

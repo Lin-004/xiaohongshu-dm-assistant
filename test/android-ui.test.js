@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { detectAndroidPageState } from '../src/channels/android-page-state.js';
 import {
   extractConversationContext,
   extractConversationSummaries,
+  findBottomTabBounds,
   parseUiHierarchy,
   summarizeUiTexts
 } from '../src/channels/android-ui.js';
@@ -13,7 +15,7 @@ const conversationListXml = `<?xml version="1.0" encoding="UTF-8"?>
     <node index="0" text="消息" bounds="[0,0][1080,120]"></node>
     <node index="1" text="" clickable="true" bounds="[0,180][1080,360]">
       <node index="0" text="品牌方A" bounds="[48,210][380,260]"></node>
-      <node index="1" text="你好，想合作一下" bounds="[48,270][620,320]"></node>
+      <node index="1" text="你好，想合作一个视频" bounds="[48,270][620,320]"></node>
       <node index="2" text="1" bounds="[980,230][1030,280]"></node>
     </node>
     <node index="2" text="" clickable="true" bounds="[0,360][1080,540]">
@@ -28,8 +30,30 @@ const conversationDetailXml = `<?xml version="1.0" encoding="UTF-8"?>
   <node index="0" text="" bounds="[0,0][1080,2400]">
     <node index="0" text="品牌方A" bounds="[320,78][760,148]"></node>
     <node index="1" text="你好" bounds="[120,520][280,580]"></node>
-    <node index="2" text="想合作一下" bounds="[700,700][980,760]"></node>
-    <node index="3" text="发送" bounds="[930,2240][1040,2320]"></node>
+    <node index="2" text="想合作一个视频" bounds="[700,700][980,760]"></node>
+    <node index="3" text="发消息…" bounds="[930,2240][1040,2320]"></node>
+  </node>
+</hierarchy>`;
+
+const blockedPopupXml = `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" bounds="[0,0][1080,2400]">
+    <node index="0" text="消息" bounds="[420,80][660,140]"></node>
+    <node index="1" text="允许小红书发送通知吗" bounds="[180,760][900,860]"></node>
+    <node index="2" text="暂不开启" clickable="true" bounds="[180,980][500,1080]"></node>
+    <node index="3" text="允许" clickable="true" bounds="[580,980][900,1080]"></node>
+  </node>
+</hierarchy>`;
+
+const unknownPageXml = `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" bounds="[0,0][1080,2400]">
+    <node index="0" text="首页" bounds="[420,80][660,140]"></node>
+    <node index="1" text="推荐" bounds="[120,260][280,320]"></node>
+    <node index="2" text="发现更多内容" bounds="[120,420][620,500]"></node>
+    <node index="3" text="" clickable="true" bounds="[720,2240][980,2380]">
+      <node index="0" text="消息" bounds="[780,2280][900,2340]"></node>
+    </node>
   </node>
 </hierarchy>`;
 
@@ -51,8 +75,8 @@ test('extractConversationContext reads title and recent message history', () => 
   const context = extractConversationContext(conversationDetailXml, 8);
 
   assert.equal(context.title, '品牌方A');
-  assert.deepEqual(context.history, ['你好', '想合作一下']);
-  assert.equal(context.latestMessage, '想合作一下');
+  assert.deepEqual(context.history, ['你好', '想合作一个视频']);
+  assert.equal(context.latestMessage, '想合作一个视频');
 });
 
 test('summarizeUiTexts exposes visible text snippets for dump inspection', () => {
@@ -61,4 +85,39 @@ test('summarizeUiTexts exposes visible text snippets for dump inspection', () =>
   assert.equal(summary.length, 3);
   assert.equal(summary[0].text, '消息');
   assert.equal(summary[1].text, '品牌方A');
+});
+
+test('detectAndroidPageState identifies conversation list page', () => {
+  const pageState = detectAndroidPageState(conversationListXml);
+
+  assert.equal(pageState.state, 'conversation_list');
+  assert.equal(pageState.signals.conversationCount, 2);
+});
+
+test('detectAndroidPageState identifies conversation detail page', () => {
+  const pageState = detectAndroidPageState(conversationDetailXml);
+
+  assert.equal(pageState.state, 'conversation_detail');
+  assert.equal(pageState.topTitle, '品牌方A');
+});
+
+test('detectAndroidPageState identifies blocked popup page', () => {
+  const pageState = detectAndroidPageState(blockedPopupXml);
+
+  assert.equal(pageState.state, 'blocked_by_popup');
+  assert.deepEqual(pageState.signals.popupTexts, ['暂不开启', '允许']);
+});
+
+test('detectAndroidPageState falls back to unknown page', () => {
+  const pageState = detectAndroidPageState(unknownPageXml);
+
+  assert.equal(pageState.state, 'unknown');
+});
+
+test('findBottomTabBounds finds bottom message tab action area', () => {
+  const bounds = findBottomTabBounds(unknownPageXml, '消息');
+
+  assert.ok(bounds);
+  assert.equal(bounds.centerX, 850);
+  assert.equal(bounds.centerY, 2310);
 });

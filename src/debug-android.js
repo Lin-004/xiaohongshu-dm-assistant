@@ -71,5 +71,8 @@ function sleep(ms) {
 
 main().catch((error) => {
   logger.error(error.message);
+  if (error.details) {
+    logger.error(`details=${JSON.stringify(error.details)}`);
+  }
   process.exitCode = 1;
 });
