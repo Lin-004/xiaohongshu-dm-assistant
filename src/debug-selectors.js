@@ -1,10 +1,14 @@
-import { collectSelectorStats, createInboxPage, launchBrowser } from './xiaohongshu.js';
+import { getChannel } from './channel.js';
 import { logger } from './logger.js';
 
 async function main() {
-  const context = await launchBrowser();
-  const page = await createInboxPage(context);
-  const stats = await collectSelectorStats(page);
+  const channel = getChannel();
+  if (channel.name !== 'web') {
+    throw new Error('选择器调试工具只支持 web 通道。请先使用 XHS_CHANNEL=web。');
+  }
+
+  const runtime = await channel.createRuntime();
+  const stats = await channel.collectDebugStats(runtime);
 
   for (const [group, items] of Object.entries(stats)) {
     logger.info(`选择器分组: ${group}`);
@@ -13,7 +17,7 @@ async function main() {
     }
   }
 
-  await context.close();
+  await channel.closeRuntime(runtime);
 }
 
 main().catch((error) => {

@@ -1,7 +1,7 @@
+import { getChannel } from './channel.js';
 import { config, validateRuntimeConfig } from './config.js';
 import { generateReply } from './llm.js';
 import { logger } from './logger.js';
-import { loadState, saveState } from './state-store.js';
 import {
   formatConversationNotification,
   safeNotify
@@ -11,18 +11,8 @@ import {
   getMessageHash,
   shouldRequireManualReview
 } from './policy.js';
-import {
-  createInboxPage,
-  launchBrowser,
-  openConversation,
-  readConversationContext,
-  readUnreadConversations,
-  sendReply
-} from './xiaohongshu.js';
-import {
-  nowIso,
-  sleep
-} from './utils.js';
+import { loadState, saveState } from './state-store.js';
+import { nowIso, sleep } from './utils.js';
 
 async function main() {
   const configErrors = validateRuntimeConfig();
@@ -31,8 +21,9 @@ async function main() {
   }
 
   const state = await loadState();
-  const context = await launchBrowser();
-  const page = await createInboxPage(context);
+  const channel = getChannel();
+  const runtime = await channel.createRuntime();
+  const canSendReplies = channel.capabilities?.sendReply !== false;
   let stopped = false;
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -46,15 +37,25 @@ async function main() {
     });
   }
 
-  logger.info('小红书私信监听已启动');
-  logger.info(`自动发送: ${config.xiaohongshu.autoSendReply ? '开启' : '关闭'}`);
+  logger.info(`小红书私信监听已启动，当前通道: ${channel.name}`);
+  if (config.xiaohongshu.autoSendReply && !canSendReplies) {
+    logger.warn('当前通道不支持自动发送，将退化为仅生成 AI 草稿。');
+  }
+  logger.info(
+    `自动发送: ${
+      config.xiaohongshu.autoSendReply && canSendReplies ? '开启' : '关闭'
+    }`
+  );
 
   while (!stopped) {
     try {
-      await monitorOnce(page, state);
+      await monitorOnce(channel, runtime, state);
     } catch (error) {
       logger.error(`轮询失败: ${error.message}`);
-      await safeNotify(`小红书私信监听异常\n错误: ${error.message}`, '监听异常通知');
+      await safeNotify(
+        `小红书私信监听异常\n错误: ${error.message}`,
+        '监听异常通知'
+      );
     } finally {
       await saveState(state);
     }
@@ -63,13 +64,14 @@ async function main() {
   }
 
   await saveState(state);
-  await context.close();
+  await channel.closeRuntime(runtime);
   logger.info('监听器已退出');
 }
 
-async function monitorOnce(page, state) {
-  const conversations = await readUnreadConversations(page);
+async function monitorOnce(channel, runtime, state) {
+  const conversations = await channel.listUnreadConversations(runtime);
   const unreadConversations = conversations.filter((item) => item.unread);
+  const canSendReplies = channel.capabilities?.sendReply !== false;
 
   if (!unreadConversations.length) {
     logger.info('本轮没有发现未读私信');
@@ -79,15 +81,18 @@ async function monitorOnce(page, state) {
   logger.info(`发现 ${unreadConversations.length} 个未读会话`);
 
   for (const conversation of unreadConversations) {
-    await openConversation(page, conversation.index);
-    const context = await readConversationContext(page);
+    await channel.openConversation(runtime, conversation);
+    const context = await channel.readConversationContext(runtime);
 
     if (!context.latestMessage) {
       logger.warn(`跳过空消息会话: ${conversation.text}`);
       continue;
     }
 
-    const conversationStateKey = getConversationStateKey(context.title, conversation.text);
+    const conversationStateKey = getConversationStateKey(
+      context.title,
+      conversation.text
+    );
     const messageHash = getMessageHash(context.latestMessage, context.history);
     const record = state.conversations[conversationStateKey];
 
@@ -129,8 +134,8 @@ async function monitorOnce(page, state) {
       let delivery = '仅生成';
       let mode = 'draft-only';
 
-      if (config.xiaohongshu.autoSendReply) {
-        await sendReply(page, reply);
+      if (config.xiaohongshu.autoSendReply && canSendReplies) {
+        await channel.sendReply(runtime, reply);
         delivery = '已自动发送';
         mode = 'auto-send';
       }
@@ -155,7 +160,12 @@ async function monitorOnce(page, state) {
     } catch (error) {
       logger.error(`处理会话失败: ${context.title} - ${error.message}`);
       await safeNotify(
-        `小红书私信处理异常\n会话: ${context.title}\n用户消息: ${context.latestMessage}\n错误: ${error.message}`,
+        [
+          '小红书私信处理异常',
+          `会话: ${context.title}`,
+          `用户消息: ${context.latestMessage}`,
+          `错误: ${error.message}`
+        ].join('\n'),
         '单会话异常通知'
       );
     } finally {

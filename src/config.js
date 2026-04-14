@@ -75,6 +75,9 @@ export const config = {
     stateFile: path.join(dataDir, 'state.json'),
     inboxUrlFile
   },
+  channel: {
+    provider: parseEnum(process.env.XHS_CHANNEL, ['web', 'android'], 'web')
+  },
   xiaohongshu: {
     inboxUrl: resolveInboxUrl(),
     browserChannel: process.env.XHS_BROWSER_CHANNEL || 'msedge',
@@ -116,6 +119,13 @@ export const config = {
       'vx',
       '手机号'
     ])
+  },
+  android: {
+    adbPath: process.env.ANDROID_ADB_PATH || 'adb',
+    deviceId: process.env.ANDROID_DEVICE_ID || '',
+    packageName: process.env.ANDROID_PACKAGE_NAME || 'com.xingin.xhs',
+    launcherActivity: process.env.ANDROID_LAUNCHER_ACTIVITY || '',
+    autoSendReply: parseBoolean(process.env.ANDROID_AUTO_SEND_REPLY, false)
   },
   llm: {
     baseUrl: process.env.LLM_BASE_URL || 'https://api.openai.com/v1',

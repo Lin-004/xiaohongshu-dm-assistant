@@ -8,6 +8,7 @@
     "login": "node src/login.js",
     "start": "node src/index.js",
     "debug:selectors": "node src/debug-selectors.js",
+    "debug:android": "node src/debug-android.js",
     "test": "node --test --test-concurrency=1 --test-isolation=none"
   },
   "engines": {
