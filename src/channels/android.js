@@ -1,3 +1,5 @@
+import { execFile as execFileCallback } from 'node:child_process';
+import { promisify } from 'node:util';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { normalizeText, sleep } from '../utils.js';
@@ -13,17 +15,22 @@ import { detectAndroidPageState } from './android-page-state.js';
 import {
   extractConversationContext,
   extractConversationSummaries,
-  findBottomTabBounds
+  findBottomTabBounds,
+  findMessageInputBounds,
+  findMessageInputState,
+  findSendButtonBounds
 } from './android-ui.js';
 
 const listRecoveryAttempts = 3;
 const detailConfirmAttempts = 4;
 const navigationDelayMs = 900;
+const sendConfirmAttempts = 3;
+const execFile = promisify(execFileCallback);
 
 export const androidChannel = {
   name: 'android',
   capabilities: {
-    sendReply: false
+    sendReply: true
   },
   async createRuntime() {
     const runtime = {
@@ -82,10 +89,56 @@ export const androidChannel = {
       config.xiaohongshu.messageHistoryLimit
     );
   },
-  async sendReply() {
-    throw new Error(
-      'Android 通道当前处于第二阶段，仅支持监控、读取和生成草稿，不支持自动发送。'
+  async sendReply(runtime, reply) {
+    const beforeXml = await dumpUiHierarchy(runtime);
+    const beforeState = detectAndroidPageState(beforeXml);
+
+    if (beforeState.state !== 'conversation_detail') {
+      throw new AndroidChannelError(
+        androidErrorCodes.detailParseFailed,
+        '当前页面不在会话详情页，无法执行自动发送。',
+        { pageState: beforeState }
+      );
+    }
+
+    const beforeContext = extractConversationContext(
+      beforeXml,
+      config.xiaohongshu.messageHistoryLimit
     );
+    const inputBounds = findMessageInputBounds(beforeXml);
+
+    if (!inputBounds) {
+      throw new AndroidChannelError('SEND_INPUT_NOT_FOUND', '未找到发送输入框', {
+        pageState: beforeState
+      });
+    }
+
+    await tap(runtime, inputBounds.centerX, inputBounds.centerY);
+    await sleep(300);
+    await clearMessageInput(runtime, beforeXml);
+    await typeReplyText(runtime, reply);
+    await sleep(300);
+
+    const afterTypeXml = await dumpUiHierarchy(runtime);
+    const sendButtonBounds = findSendButtonBounds(afterTypeXml);
+
+    if (!sendButtonBounds) {
+      throw new AndroidChannelError('SEND_BUTTON_NOT_FOUND', '未找到发送按钮', {
+        pageState: detectAndroidPageState(afterTypeXml)
+      });
+    }
+
+    await tap(runtime, sendButtonBounds.centerX, sendButtonBounds.centerY);
+    await sleep(500);
+
+    const confirmed = await confirmSendSuccess(runtime, reply, beforeContext);
+    if (!confirmed) {
+      throw new AndroidChannelError(
+        'SEND_CONFIRM_FAILED',
+        '发送后无法确认消息已发出',
+        { previousLatestMessage: beforeContext.latestMessage }
+      );
+    }
   }
 };
 
@@ -217,4 +270,94 @@ function normalizeConversationTitleForMatch(value) {
     .replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '')
     .replace(/[^\p{L}\p{N}]+/gu, '')
     .trim();
+}
+
+async function clearMessageInput(runtime, xml) {
+  const inputState = findMessageInputState(xml);
+  if (inputState?.isEmpty) {
+    return;
+  }
+
+  const clearCount = Math.max((inputState?.text || '').length + 8, 16);
+  await runAndroidShell(runtime, ['input', 'keyevent', '123']);
+
+  for (let index = 0; index < clearCount; index += 1) {
+    await runAndroidShell(runtime, ['input', 'keyevent', '67']);
+  }
+}
+
+async function typeReplyText(runtime, reply) {
+  await runAndroidShell(runtime, ['input', 'text', escapeForAndroidInput(reply)]);
+}
+
+async function confirmSendSuccess(runtime, reply, beforeContext) {
+  const expected = normalizeText(reply);
+  const previousLatest = normalizeText(beforeContext.latestMessage);
+
+  for (let attempt = 0; attempt < sendConfirmAttempts; attempt += 1) {
+    await sleep(500);
+    const xml = await dumpUiHierarchy(runtime);
+    const pageState = detectAndroidPageState(xml);
+
+    if (pageState.state !== 'conversation_detail') {
+      return false;
+    }
+
+    const afterContext = extractConversationContext(
+      xml,
+      config.xiaohongshu.messageHistoryLimit
+    );
+    const inputState = findMessageInputState(xml);
+    const latestMessage = normalizeText(afterContext.latestMessage);
+
+    if (latestMessage && latestMessage === expected) {
+      return true;
+    }
+
+    if (
+      inputState?.isEmpty &&
+      latestMessage &&
+      latestMessage !== previousLatest &&
+      areMessagesHighlySimilar(latestMessage, expected)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function areMessagesHighlySimilar(left, right) {
+  const normalizedLeft = normalizeText(left);
+  const normalizedRight = normalizeText(right);
+
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.includes(normalizedRight) ||
+    normalizedRight.includes(normalizedLeft)
+  );
+}
+
+function escapeForAndroidInput(value) {
+  return String(value)
+    .replace(/ /g, '%s')
+    .replace(/([()<>|;&*~"'\\$`])/g, '\\$1');
+}
+
+async function runAndroidShell(runtime, args) {
+  const baseArgs = runtime.deviceId ? ['-s', runtime.deviceId] : [];
+
+  try {
+    await execFile(runtime.adbPath, [...baseArgs, 'shell', ...args], {
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024
+    });
+  } catch (error) {
+    const detail = String(error.stderr || error.stdout || error.message).trim();
+    throw new Error(detail || 'ADB 命令执行失败');
+  }
 }

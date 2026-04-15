@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  getAutoSendDecision,
   getConversationStateKey,
   getMessageHash,
   getMessageIncrement,
-  shouldRequireManualReview
+  shouldRequireManualReview,
+  validateAutoSendDraft
 } from '../src/policy.js';
 
 test('manual review for business cooperation keywords', () => {
@@ -77,14 +79,14 @@ test('getMessageIncrement limits first-handle increment by unread count', () => 
 test('getMessageIncrement returns appended suffix when history extends', () => {
   const increment = getMessageIncrement(
     {
-      history: ['你好', '资料发你了', '收到', '还有吗']
+      history: ['你好', '资料发你了', '收到了', '还有吗']
     },
     {
       lastContextMessages: ['你好', '资料发你了']
     }
   );
 
-  assert.deepEqual(increment, ['收到', '还有吗']);
+  assert.deepEqual(increment, ['收到了', '还有吗']);
 });
 
 test('getMessageIncrement returns empty array when no new messages exist', () => {
@@ -103,9 +105,57 @@ test('getMessageIncrement returns empty array when no new messages exist', () =>
 test('conversation key and message hash are stable', () => {
   const stateKeyA = getConversationStateKey('张三', '你好');
   const stateKeyB = getConversationStateKey('张三', '你好');
-  const messageHashA = getMessageHash('你好', ['你好', '请问怎么卖']);
-  const messageHashB = getMessageHash('你好', ['你好', '请问怎么卖']);
+  const messageHashA = getMessageHash('你好', ['你好', '请问怎么收费']);
+  const messageHashB = getMessageHash('你好', ['你好', '请问怎么收费']);
 
   assert.equal(stateKeyA, stateKeyB);
   assert.equal(messageHashA, messageHashB);
+});
+
+test('validateAutoSendDraft rejects blank or punctuation-only drafts', () => {
+  assert.equal(validateAutoSendDraft('   ').valid, false);
+  assert.equal(validateAutoSendDraft('!!!').valid, false);
+  assert.equal(validateAutoSendDraft('你好').valid, true);
+});
+
+test('getAutoSendDecision blocks disabled, manual review, and duplicate send', () => {
+  const disabled = getAutoSendDecision({
+    autoSendEnabled: false,
+    canSendReplies: true,
+    pageState: 'conversation_detail',
+    incrementMessages: ['你好'],
+    reply: '收到',
+    manualReason: null,
+    record: null,
+    messageHash: 'hash-a'
+  });
+  const manualReview = getAutoSendDecision({
+    autoSendEnabled: true,
+    canSendReplies: true,
+    pageState: 'conversation_detail',
+    incrementMessages: ['你好'],
+    reply: '收到',
+    manualReason: '命中人工审核',
+    record: null,
+    messageHash: 'hash-b'
+  });
+  const duplicate = getAutoSendDecision({
+    autoSendEnabled: true,
+    canSendReplies: true,
+    pageState: 'conversation_detail',
+    incrementMessages: ['你好'],
+    reply: '收到',
+    manualReason: null,
+    record: {
+      lastHandledMessageHash: 'hash-c'
+    },
+    messageHash: 'hash-c'
+  });
+
+  assert.equal(disabled.allowed, false);
+  assert.equal(disabled.code, 'AUTO_SEND_DISABLED');
+  assert.equal(manualReview.allowed, false);
+  assert.equal(manualReview.code, 'AUTO_SEND_MANUAL_REVIEW_REQUIRED');
+  assert.equal(duplicate.allowed, false);
+  assert.equal(duplicate.code, 'AUTO_SEND_DUPLICATED_INCREMENT');
 });
