@@ -8,6 +8,7 @@ import {
   safeNotify
 } from './notifier.js';
 import {
+  getAutoSendDecision,
   getConversationStateKey,
   getMessageHash,
   getMessageIncrement,
@@ -125,7 +126,7 @@ async function handleConversation(
 
   if (!incrementMessages.length) {
     logger.info(`候选会话没有新增消息，跳过: ${context.title}`);
-    state.conversations[conversationStateKey] = buildConversationRecord({
+    state.conversations[conversationStateKey] = buildObservedConversationRecord({
       record,
       context,
       mode: record?.mode || 'draft-only'
@@ -143,10 +144,9 @@ async function handleConversation(
   try {
     if (record?.lastHandledMessageHash === messageHash) {
       logger.info(`消息增量已处理，跳过: ${context.title}`);
-      state.conversations[conversationStateKey] = buildConversationRecord({
+      state.conversations[conversationStateKey] = buildObservedConversationRecord({
         record,
         context,
-        messageHash,
         mode: record?.mode || 'draft-only'
       });
       return;
@@ -177,18 +177,76 @@ async function handleConversation(
         context,
         messageHash,
         reply,
-        mode: 'manual-review'
+        mode: 'manual-review',
+        sendState: {
+          result: 'skipped',
+          attemptedAt: '',
+          failureCode: ''
+        }
       });
       return;
     }
 
+    const autoSendDecision = getAutoSendDecision({
+      autoSendEnabled: config.xiaohongshu.autoSendReply,
+      canSendReplies,
+      pageState: 'conversation_detail',
+      incrementMessages,
+      reply,
+      manualReason,
+      record,
+      messageHash
+    });
+
     let delivery = '仅生成';
     let mode = 'draft-only';
+    let sendState = {
+      result: 'skipped',
+      attemptedAt: '',
+      failureCode: ''
+    };
 
-    if (config.xiaohongshu.autoSendReply && canSendReplies) {
-      await channel.sendReply(runtime, reply);
-      delivery = '已自动发送';
-      mode = 'auto-send';
+    if (autoSendDecision.allowed) {
+      sendState.attemptedAt = nowIso();
+
+      try {
+        await channel.sendReply(runtime, reply);
+        delivery = '已自动发送';
+        mode = 'auto-send';
+        sendState.result = 'success';
+      } catch (sendError) {
+        const failureCode = sendError.code || 'SEND_FAILED';
+        logger.error(
+          `自动发送失败: ${context.title} - ${failureCode}: ${sendError.message}`
+        );
+        await safeNotify(
+          formatConversationNotification({
+            conversationTitle: replyContext.title,
+            latestMessage: replyContext.latestMessage,
+            reply,
+            outcome: '转人工',
+            reason: `自动发送失败: ${failureCode}`
+          }),
+          '自动发送失败通知'
+        );
+
+        state.conversations[conversationStateKey] = buildConversationRecord({
+          record,
+          context,
+          reply,
+          mode: 'auto-send-failed',
+          sendState: {
+            result: 'failed',
+            attemptedAt: sendState.attemptedAt,
+            failureCode
+          }
+        });
+        return;
+      }
+    } else if (config.xiaohongshu.autoSendReply) {
+      logger.info(
+        `自动发送未命中前置条件，退化为草稿通知: ${context.title} - ${autoSendDecision.code}`
+      );
     }
 
     await safeNotify(
@@ -207,7 +265,8 @@ async function handleConversation(
       context,
       messageHash,
       reply,
-      mode
+      mode,
+      sendState
     });
   } catch (error) {
     logger.error(`处理会话失败: ${context.title} - ${error.message}`);
@@ -230,7 +289,8 @@ function buildConversationRecord({
   context,
   messageHash,
   reply,
-  mode
+  mode,
+  sendState
 }) {
   return {
     ...record,
@@ -238,7 +298,18 @@ function buildConversationRecord({
     lastHandledAt: nowIso(),
     lastReplyText: reply ?? record?.lastReplyText ?? '',
     lastContextMessages: [...(context.history || [])],
+    lastSendAttemptAt: sendState?.attemptedAt || record?.lastSendAttemptAt || '',
+    lastSendResult: sendState?.result || record?.lastSendResult || 'skipped',
+    lastSendFailureCode: sendState?.failureCode || '',
     mode
+  };
+}
+
+function buildObservedConversationRecord({ record, context, mode }) {
+  return {
+    ...record,
+    lastContextMessages: [...(context.history || [])],
+    mode: mode ?? record?.mode
   };
 }
 

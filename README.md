@@ -112,6 +112,34 @@ npm start
 npm test
 ```
 
+## 同步线程状态到 GitHub Project
+
+当前项目支持把 `docs/thread-status.md` 一键同步到 GitHub Project draft items。
+
+```bash
+npm run sync:project
+```
+
+默认行为：
+
+- 从 `docs/thread-status.md` 读取当前主线程维护的共享状态
+- 同步到 GitHub Project `Lin-004 / Agent Team / #2`
+- 更新 10 个 draft items
+  - 5 个 `Current`
+  - 5 个 `Next`
+
+脚本的认证优先级：
+
+1. `GITHUB_TOKEN`
+2. `GITHUB_PERSONAL_ACCESS_TOKEN`
+3. `~/.codex/config.toml` 中的 `GITHUB_PERSONAL_ACCESS_TOKEN`
+
+如只想检查解析结果而不写入 GitHub：
+
+```bash
+node scripts/sync-thread-status.js --dry-run
+```
+
 ## 推荐使用顺序
 
 1. 先只跑“Android 监控 + AI 草稿 + 飞书通知”

@@ -9,6 +9,7 @@
     "start": "node src/index.js",
     "debug:selectors": "node src/debug-selectors.js",
     "debug:android": "node src/debug-android.js",
+    "sync:project": "node scripts/sync-thread-status.js",
     "test": "node --test --test-concurrency=1 --test-isolation=none"
   },
   "engines": {

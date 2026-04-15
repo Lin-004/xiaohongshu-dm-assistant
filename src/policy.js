@@ -79,6 +79,86 @@ export function shouldRequireManualReview(
   return null;
 }
 
+export function validateAutoSendDraft(reply) {
+  const normalized = normalizeText(reply);
+
+  if (!normalized) {
+    return {
+      valid: false,
+      code: 'AUTO_SEND_DRAFT_EMPTY',
+      reason: '草稿为空'
+    };
+  }
+
+  if (normalized.length < 2 || normalized.length > 120) {
+    return {
+      valid: false,
+      code: 'AUTO_SEND_DRAFT_LENGTH_INVALID',
+      reason: '草稿长度超出允许范围'
+    };
+  }
+
+  if (!/[\p{L}\p{N}\p{Script=Han}]/u.test(normalized)) {
+    return {
+      valid: false,
+      code: 'AUTO_SEND_DRAFT_CONTENT_INVALID',
+      reason: '草稿仅包含表情或标点'
+    };
+  }
+
+  return {
+    valid: true,
+    code: 'AUTO_SEND_DRAFT_OK',
+    reason: ''
+  };
+}
+
+export function getAutoSendDecision({
+  autoSendEnabled,
+  canSendReplies,
+  pageState,
+  incrementMessages,
+  reply,
+  manualReason,
+  record,
+  messageHash
+}) {
+  if (!autoSendEnabled) {
+    return blockedAutoSend('AUTO_SEND_DISABLED', '自动发送未开启');
+  }
+
+  if (!canSendReplies) {
+    return blockedAutoSend('AUTO_SEND_CHANNEL_UNSUPPORTED', '当前通道不支持自动发送');
+  }
+
+  if (pageState !== 'conversation_detail') {
+    return blockedAutoSend('AUTO_SEND_NOT_IN_DETAIL', '当前页面不在会话详情页');
+  }
+
+  if (!Array.isArray(incrementMessages) || incrementMessages.length === 0) {
+    return blockedAutoSend('AUTO_SEND_NO_INCREMENT', '当前没有有效消息增量');
+  }
+
+  const draftValidation = validateAutoSendDraft(reply);
+  if (!draftValidation.valid) {
+    return blockedAutoSend(draftValidation.code, draftValidation.reason);
+  }
+
+  if (record?.lastHandledMessageHash && record.lastHandledMessageHash === messageHash) {
+    return blockedAutoSend('AUTO_SEND_DUPLICATED_INCREMENT', '命中重复发送保护');
+  }
+
+  if (manualReason) {
+    return blockedAutoSend('AUTO_SEND_MANUAL_REVIEW_REQUIRED', manualReason);
+  }
+
+  return {
+    allowed: true,
+    code: 'AUTO_SEND_ALLOWED',
+    reason: ''
+  };
+}
+
 function normalizeMessages(messages) {
   return messages.map((item) => normalizeText(item)).filter(Boolean);
 }
@@ -121,4 +201,12 @@ function limitIncrementByUnreadCount(messages, unreadCount) {
   }
 
   return messages.slice(-unreadCount);
+}
+
+function blockedAutoSend(code, reason) {
+  return {
+    allowed: false,
+    code,
+    reason
+  };
 }

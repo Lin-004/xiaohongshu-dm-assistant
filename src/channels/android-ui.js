@@ -93,6 +93,104 @@ export function findBottomTabBounds(xml, label) {
   return target.bounds.width > 0 ? target.bounds : null;
 }
 
+export function findMessageInputBounds(xml) {
+  const tree = parseUiHierarchy(xml);
+  const screen = getScreenBounds(tree);
+  const candidates = tree.descendants
+    .filter((node) => node.type === 'node')
+    .map((node) => ({
+      node,
+      text: getDisplayText(node)
+    }))
+    .filter(({ node, text }) => {
+      return (
+        node.bounds.top > screen.height - 360 &&
+        node.bounds.width > screen.width * 0.35 &&
+        (isInputPlaceholder(text) || node.attrs.class?.includes('EditText'))
+      );
+    })
+    .sort((left, right) => {
+      if (left.node.bounds.top !== right.node.bounds.top) {
+        return left.node.bounds.top - right.node.bounds.top;
+      }
+
+      return left.node.bounds.left - right.node.bounds.left;
+    });
+
+  const target = candidates[0]?.node;
+  return target?.bounds || null;
+}
+
+export function findMessageInputState(xml) {
+  const tree = parseUiHierarchy(xml);
+  const screen = getScreenBounds(tree);
+  const candidates = tree.descendants
+    .filter((node) => node.type === 'node')
+    .map((node) => ({
+      node,
+      text: getDisplayText(node)
+    }))
+    .filter(({ node, text }) => {
+      return (
+        node.bounds.top > screen.height - 360 &&
+        node.bounds.width > screen.width * 0.35 &&
+        (isInputPlaceholder(text) ||
+          node.attrs.class?.includes('EditText') ||
+          node.attrs.focusable === 'true')
+      );
+    })
+    .sort((left, right) => {
+      if (left.node.bounds.top !== right.node.bounds.top) {
+        return left.node.bounds.top - right.node.bounds.top;
+      }
+
+      return left.node.bounds.left - right.node.bounds.left;
+    });
+
+  const target = candidates[0];
+  if (!target) {
+    return null;
+  }
+
+  return {
+    bounds: target.node.bounds,
+    text: target.text,
+    isEmpty: !target.text || isInputPlaceholder(target.text)
+  };
+}
+
+export function findSendButtonBounds(xml) {
+  const tree = parseUiHierarchy(xml);
+  const screen = getScreenBounds(tree);
+  const explicitCandidate = tree.descendants
+    .filter((node) => node.type === 'node')
+    .map((node) => ({
+      node,
+      text: getDisplayText(node)
+    }))
+    .filter(({ node, text }) => {
+      return (
+        node.bounds.top > screen.height - 360 &&
+        node.bounds.left > screen.width * 0.65 &&
+        (text === '发送' || text === '鍙戦€?' || text === 'send')
+      );
+    })
+    .sort((left, right) => left.node.bounds.left - right.node.bounds.left)[0];
+
+  if (explicitCandidate) {
+    return explicitCandidate.node.bounds;
+  }
+
+  const clickableCandidate = tree.descendants
+    .filter((node) => node.type === 'node')
+    .filter((node) => node.attrs.clickable === 'true')
+    .filter((node) => node.bounds.top > screen.height - 360)
+    .filter((node) => node.bounds.left > screen.width * 0.65)
+    .sort((left, right) => left.bounds.left - right.bounds.left)[0];
+
+  return clickableCandidate?.bounds || null;
+}
+
 export function parseUiHierarchy(xml) {
   const root = {
     type: 'root',

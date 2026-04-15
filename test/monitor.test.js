@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { config } from '../src/config.js';
 import { monitorOnce } from '../src/index.js';
 import { getConversationStateKey } from '../src/policy.js';
 
@@ -50,13 +51,7 @@ test('monitorOnce rescans list after handling one conversation', async () => {
         ok: true,
         async json() {
           return {
-            choices: [
-              {
-                message: {
-                  content: 'mock-reply'
-                }
-              }
-            ]
+            choices: [{ message: { content: 'mock-reply' } }]
           };
         }
       };
@@ -138,25 +133,24 @@ test('monitorOnce skips candidate without message increment and continues rescan
     conversations: {
       [getConversationStateKey('A', 'A')]: {
         lastHandledMessageHash: 'old-hash',
+        lastHandledAt: '2026-04-14T00:00:00.000Z',
         lastContextMessages: ['old-1', 'old-2'],
         mode: 'draft-only'
       }
     }
   };
+  const originalRecord = { ...state.conversations[getConversationStateKey('A', 'A')] };
+  let llmCallCount = 0;
+  let notificationCount = 0;
 
   global.fetch = async (url) => {
     if (String(url).includes('/chat/completions')) {
+      llmCallCount += 1;
       return {
         ok: true,
         async json() {
           return {
-            choices: [
-              {
-                message: {
-                  content: 'mock-reply'
-                }
-              }
-            ]
+            choices: [{ message: { content: 'mock-reply' } }]
           };
         }
       };
@@ -175,6 +169,7 @@ test('monitorOnce skips candidate without message increment and continues rescan
     }
 
     if (String(url).includes('/im/v1/messages')) {
+      notificationCount += 1;
       return {
         ok: true,
         async text() {
@@ -195,11 +190,28 @@ test('monitorOnce skips candidate without message increment and continues rescan
   assert.deepEqual(opened, ['A', 'B']);
   assert.equal(listCount, 3);
   assert.equal(Object.keys(state.conversations).length, 2);
+  assert.equal(llmCallCount, 1);
+  assert.equal(notificationCount, 1);
+  assert.equal(
+    state.conversations[getConversationStateKey('A', 'A')].lastHandledMessageHash,
+    originalRecord.lastHandledMessageHash
+  );
+  assert.equal(
+    state.conversations[getConversationStateKey('A', 'A')].lastHandledAt,
+    originalRecord.lastHandledAt
+  );
+  assert.deepEqual(
+    state.conversations[getConversationStateKey('A', 'A')].lastContextMessages,
+    ['old-1', 'old-2']
+  );
 });
 
 test('monitorOnce limits first notification input to unread-count tail', async () => {
   const originalFetch = global.fetch;
-  const listedSnapshots = [[{ id: 'a', title: 'A', text: 'A', unread: true, unreadCount: 1, bounds: {} }], []];
+  const listedSnapshots = [
+    [{ id: 'a', title: 'A', text: 'A', unread: true, unreadCount: 1, bounds: {} }],
+    []
+  ];
   const contexts = [
     {
       title: 'A',
@@ -236,13 +248,7 @@ test('monitorOnce limits first notification input to unread-count tail', async (
         ok: true,
         async json() {
           return {
-            choices: [
-              {
-                message: {
-                  content: 'mock-reply'
-                }
-              }
-            ]
+            choices: [{ message: { content: 'mock-reply' } }]
           };
         }
       };
@@ -284,4 +290,159 @@ test('monitorOnce limits first notification input to unread-count tail', async (
   assert.equal(notifications.length, 1);
   assert.match(JSON.parse(notifications[0].content).text, /用户消息: 最新消息/);
   assert.doesNotMatch(JSON.parse(notifications[0].content).text, /hello/);
+});
+
+test('monitorOnce auto-sends on low-risk conversation when enabled', async () => {
+  const originalFetch = global.fetch;
+  const previousAutoSend = config.xiaohongshu.autoSendReply;
+  config.xiaohongshu.autoSendReply = true;
+
+  const sentReplies = [];
+  const notifications = [];
+  const channel = {
+    called: false,
+    capabilities: {
+      sendReply: true
+    },
+    async listUnreadConversations() {
+      if (this.called) {
+        return [];
+      }
+
+      this.called = true;
+      return [{ id: 'a', title: 'A', text: 'A', unread: true, bounds: {} }];
+    },
+    async openConversation() {},
+    async readConversationContext() {
+      return { title: 'A', latestMessage: '你好', history: ['你好'] };
+    },
+    async sendReply(_runtime, reply) {
+      sentReplies.push(reply);
+    }
+  };
+
+  global.fetch = async (url, options = {}) => {
+    if (String(url).includes('/chat/completions')) {
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: '收到，我看一下' } }] };
+        }
+      };
+    }
+
+    if (String(url).includes('/auth/v3/tenant_access_token/internal')) {
+      return {
+        ok: true,
+        async text() {
+          return JSON.stringify({ tenant_access_token: 'token', expire: 7200 });
+        }
+      };
+    }
+
+    if (String(url).includes('/im/v1/messages')) {
+      notifications.push(JSON.parse(String(options.body)));
+      return {
+        ok: true,
+        async text() {
+          return JSON.stringify({ code: 0 });
+        }
+      };
+    }
+
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  const state = { conversations: {} };
+
+  try {
+    await monitorOnce(channel, {}, state);
+  } finally {
+    global.fetch = originalFetch;
+    config.xiaohongshu.autoSendReply = previousAutoSend;
+  }
+
+  const record = Object.values(state.conversations)[0];
+  assert.deepEqual(sentReplies, ['收到，我看一下']);
+  assert.equal(record.mode, 'auto-send');
+  assert.equal(record.lastSendResult, 'success');
+  assert.equal(notifications.length, 1);
+});
+
+test('monitorOnce falls back to manual notification when auto-send fails', async () => {
+  const originalFetch = global.fetch;
+  const previousAutoSend = config.xiaohongshu.autoSendReply;
+  config.xiaohongshu.autoSendReply = true;
+
+  const notifications = [];
+  const channel = {
+    called: false,
+    capabilities: {
+      sendReply: true
+    },
+    async listUnreadConversations() {
+      if (this.called) {
+        return [];
+      }
+
+      this.called = true;
+      return [{ id: 'a', title: 'A', text: 'A', unread: true, bounds: {} }];
+    },
+    async openConversation() {},
+    async readConversationContext() {
+      return { title: 'A', latestMessage: '你好', history: ['你好'] };
+    },
+    async sendReply() {
+      const error = new Error('missing input');
+      error.code = 'SEND_INPUT_NOT_FOUND';
+      throw error;
+    }
+  };
+
+  global.fetch = async (url, options = {}) => {
+    if (String(url).includes('/chat/completions')) {
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: '收到，我看一下' } }] };
+        }
+      };
+    }
+
+    if (String(url).includes('/auth/v3/tenant_access_token/internal')) {
+      return {
+        ok: true,
+        async text() {
+          return JSON.stringify({ tenant_access_token: 'token', expire: 7200 });
+        }
+      };
+    }
+
+    if (String(url).includes('/im/v1/messages')) {
+      notifications.push(JSON.parse(String(options.body)));
+      return {
+        ok: true,
+        async text() {
+          return JSON.stringify({ code: 0 });
+        }
+      };
+    }
+
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  const state = { conversations: {} };
+
+  try {
+    await monitorOnce(channel, {}, state);
+  } finally {
+    global.fetch = originalFetch;
+    config.xiaohongshu.autoSendReply = previousAutoSend;
+  }
+
+  const record = Object.values(state.conversations)[0];
+  assert.equal(record.mode, 'auto-send-failed');
+  assert.equal(record.lastSendResult, 'failed');
+  assert.equal(record.lastSendFailureCode, 'SEND_INPUT_NOT_FOUND');
+  assert.equal(notifications.length, 1);
 });

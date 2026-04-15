@@ -76,7 +76,7 @@ export const config = {
     inboxUrlFile
   },
   channel: {
-    provider: parseEnum(process.env.XHS_CHANNEL, ['web', 'android'], 'web')
+    provider: parseEnum(process.env.XHS_CHANNEL, ['web', 'android'], 'android')
   },
   xiaohongshu: {
     inboxUrl: resolveInboxUrl(),
@@ -125,7 +125,9 @@ export const config = {
     deviceId: process.env.ANDROID_DEVICE_ID || '',
     packageName: process.env.ANDROID_PACKAGE_NAME || 'com.xingin.xhs',
     launcherActivity: process.env.ANDROID_LAUNCHER_ACTIVITY || '',
-    autoSendReply: parseBoolean(process.env.ANDROID_AUTO_SEND_REPLY, false)
+    tier1VisibleScreens: parseNumber(process.env.ANDROID_TIER1_VISIBLE_SCREENS, 1),
+    tier2ExtraScreens: parseNumber(process.env.ANDROID_TIER2_EXTRA_SCREENS, 1),
+    tier1ToTier2Quota: parseNumber(process.env.ANDROID_TIER1_TO_TIER2_QUOTA, 4)
   },
   llm: {
     baseUrl: process.env.LLM_BASE_URL || 'https://api.openai.com/v1',
