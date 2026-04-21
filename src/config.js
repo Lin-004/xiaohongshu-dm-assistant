@@ -125,6 +125,17 @@ export const config = {
     deviceId: process.env.ANDROID_DEVICE_ID || '',
     packageName: process.env.ANDROID_PACKAGE_NAME || 'com.xingin.xhs',
     launcherActivity: process.env.ANDROID_LAUNCHER_ACTIVITY || '',
+    inputStrategy: parseEnum(
+      process.env.ANDROID_INPUT_STRATEGY,
+      ['adb_keyboard'],
+      'adb_keyboard'
+    ),
+    adbKeyboardEnabled: parseBoolean(
+      process.env.ANDROID_ADB_KEYBOARD_ENABLED,
+      true
+    ),
+    adbKeyboardIme:
+      process.env.ANDROID_ADB_KEYBOARD_IME || 'com.android.adbkeyboard/.AdbIME',
     tier1VisibleScreens: parseNumber(process.env.ANDROID_TIER1_VISIBLE_SCREENS, 1),
     tier2ExtraScreens: parseNumber(process.env.ANDROID_TIER2_EXTRA_SCREENS, 1),
     tier1ToTier2Quota: parseNumber(process.env.ANDROID_TIER1_TO_TIER2_QUOTA, 4)

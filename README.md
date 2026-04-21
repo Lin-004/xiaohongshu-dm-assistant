@@ -183,3 +183,24 @@ node scripts/sync-thread-status.js --dry-run
   Android UI 解析逻辑
 - `src/debug-android.js`
   Android 调试工具
+## ADB Keyboard Prerequisites
+
+Android auto-send now uses `ADB Keyboard` as the primary text input path instead of
+`adb shell input text`.
+
+Before testing or using Android auto-send, make sure:
+
+1. The device is visible in `adb devices`
+2. `ADB Keyboard` is installed on the target device
+3. The IME id is configured correctly
+
+Recommended env vars:
+
+```env
+ANDROID_INPUT_STRATEGY=adb_keyboard
+ANDROID_ADB_KEYBOARD_ENABLED=true
+ANDROID_ADB_KEYBOARD_IME=com.android.adbkeyboard/.AdbIME
+```
+
+If `ADB Keyboard` is missing or unavailable, auto-send will stop before typing and
+return a clear failure code instead of silently falling back to the old input path.

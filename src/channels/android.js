@@ -26,6 +26,10 @@ const detailConfirmAttempts = 4;
 const navigationDelayMs = 900;
 const sendConfirmAttempts = 3;
 const execFile = promisify(execFileCallback);
+let adbCommandRunner = defaultAdbCommandRunner;
+const androidInputStrategyCodes = {
+  adbKeyboard: 'adb_keyboard'
+};
 
 export const androidChannel = {
   name: 'android',
@@ -37,7 +41,10 @@ export const androidChannel = {
       adbPath: config.android.adbPath,
       deviceId: config.android.deviceId,
       packageName: config.android.packageName,
-      launcherActivity: config.android.launcherActivity
+      launcherActivity: config.android.launcherActivity,
+      inputStrategy: config.android.inputStrategy,
+      adbKeyboardEnabled: config.android.adbKeyboardEnabled,
+      adbKeyboardIme: config.android.adbKeyboardIme
     };
 
     await ensureDeviceConnected(runtime);
@@ -90,14 +97,19 @@ export const androidChannel = {
     );
   },
   async sendReply(runtime, reply) {
+    const precheck = await runSendPrecheck(runtime);
+    if (!precheck.success) {
+      return precheck;
+    }
+
     const beforeXml = await dumpUiHierarchy(runtime);
     const beforeState = detectAndroidPageState(beforeXml);
-
     if (beforeState.state !== 'conversation_detail') {
-      throw new AndroidChannelError(
-        androidErrorCodes.detailParseFailed,
-        '当前页面不在会话详情页，无法执行自动发送。',
-        { pageState: beforeState }
+      return failureResult(
+        'SEND_NOT_IN_DETAIL',
+        'precheck',
+        false,
+        '当前页面不在会话详情页'
       );
     }
 
@@ -106,38 +118,68 @@ export const androidChannel = {
       config.xiaohongshu.messageHistoryLimit
     );
     const inputBounds = findMessageInputBounds(beforeXml);
-
     if (!inputBounds) {
-      throw new AndroidChannelError('SEND_INPUT_NOT_FOUND', '未找到发送输入框', {
-        pageState: beforeState
-      });
-    }
-
-    await tap(runtime, inputBounds.centerX, inputBounds.centerY);
-    await sleep(300);
-    await clearMessageInput(runtime, beforeXml);
-    await typeReplyText(runtime, reply);
-    await sleep(300);
-
-    const afterTypeXml = await dumpUiHierarchy(runtime);
-    const sendButtonBounds = findSendButtonBounds(afterTypeXml);
-
-    if (!sendButtonBounds) {
-      throw new AndroidChannelError('SEND_BUTTON_NOT_FOUND', '未找到发送按钮', {
-        pageState: detectAndroidPageState(afterTypeXml)
-      });
-    }
-
-    await tap(runtime, sendButtonBounds.centerX, sendButtonBounds.centerY);
-    await sleep(500);
-
-    const confirmed = await confirmSendSuccess(runtime, reply, beforeContext);
-    if (!confirmed) {
-      throw new AndroidChannelError(
-        'SEND_CONFIRM_FAILED',
-        '发送后无法确认消息已发出',
-        { previousLatestMessage: beforeContext.latestMessage }
+      return failureResult(
+        'SEND_INPUT_NOT_FOUND',
+        'input',
+        false,
+        '未找到发送输入框'
       );
+    }
+
+    let previousIme = precheck.currentIme;
+
+    try {
+      await tap(runtime, inputBounds.centerX, inputBounds.centerY);
+      await sleep(300);
+      await clearMessageInput(runtime, beforeXml);
+
+      const inputResult = await inputReplyWithStrategy(runtime, reply, previousIme);
+      previousIme = inputResult.previousIme;
+      if (!inputResult.success) {
+        return inputResult;
+      }
+
+      await sleep(300);
+      const afterTypeXml = await dumpUiHierarchy(runtime);
+      const sendButtonBounds = findSendButtonBounds(afterTypeXml);
+      if (!sendButtonBounds) {
+        return failureResult(
+          'SEND_BUTTON_NOT_FOUND',
+          'tap_send',
+          false,
+          '未找到发送按钮'
+        );
+      }
+
+      await tap(runtime, sendButtonBounds.centerX, sendButtonBounds.centerY);
+      await sleep(500);
+
+      const confirmed = await confirmSendSuccess(runtime, reply, beforeContext);
+      if (!confirmed) {
+        return failureResult(
+          'SEND_CONFIRM_FAILED',
+          'confirm',
+          true,
+          '发送后无法确认消息已发出'
+        );
+      }
+
+      return {
+        success: true,
+        failureCode: '',
+        failureStage: '',
+        retryable: false
+      };
+    } catch (error) {
+      return failureResult(
+        error.code || 'SEND_FAILED',
+        'input',
+        true,
+        error.message
+      );
+    } finally {
+      await restoreInputMethod(runtime, previousIme);
     }
   }
 };
@@ -272,6 +314,86 @@ function normalizeConversationTitleForMatch(value) {
     .trim();
 }
 
+async function runSendPrecheck(runtime) {
+  try {
+    await runAdbCommand(runtime, ['version']);
+  } catch (error) {
+    return failureResult(
+      'SEND_ADB_NOT_AVAILABLE',
+      'precheck',
+      false,
+      error.message
+    );
+  }
+
+  try {
+    const deviceState = await runAdbCommand(runtime, ['get-state']);
+    if (deviceState.stdout.trim() !== 'device') {
+      return failureResult(
+        'SEND_DEVICE_NOT_READY',
+        'precheck',
+        true,
+        `设备状态异常: ${deviceState.stdout.trim() || 'unknown'}`
+      );
+    }
+  } catch (error) {
+    return failureResult(
+      'SEND_DEVICE_NOT_READY',
+      'precheck',
+      true,
+      error.message
+    );
+  }
+
+  return detectInputStrategy(runtime);
+
+  if (!runtime.adbKeyboardEnabled) {
+    return failureResult(
+      'SEND_INPUT_METHOD_NOT_AVAILABLE',
+      'precheck',
+      false,
+      'ADB Keyboard 输入方案未启用'
+    );
+  }
+
+  const imeId = runtime.adbKeyboardIme;
+
+  try {
+    const imeList = await runAdbShell(runtime, ['ime', 'list', '-s']);
+    const installedImes = imeList.stdout
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (!installedImes.includes(imeId)) {
+      return failureResult(
+        'SEND_INPUT_METHOD_NOT_AVAILABLE',
+        'precheck',
+        false,
+        `未检测到 ADB Keyboard IME: ${imeId}`
+      );
+    }
+
+    await runAdbShell(runtime, ['ime', 'enable', imeId]);
+    const currentIme = await readCurrentInputMethod(runtime);
+
+    return {
+      success: true,
+      failureCode: '',
+      failureStage: '',
+      retryable: false,
+      currentIme
+    };
+  } catch (error) {
+    return failureResult(
+      'SEND_INPUT_METHOD_NOT_AVAILABLE',
+      'precheck',
+      false,
+      error.message
+    );
+  }
+}
+
 async function clearMessageInput(runtime, xml) {
   const inputState = findMessageInputState(xml);
   if (inputState?.isEmpty) {
@@ -279,15 +401,90 @@ async function clearMessageInput(runtime, xml) {
   }
 
   const clearCount = Math.max((inputState?.text || '').length + 8, 16);
-  await runAndroidShell(runtime, ['input', 'keyevent', '123']);
+  await runAdbShell(runtime, ['input', 'keyevent', '123']);
 
   for (let index = 0; index < clearCount; index += 1) {
-    await runAndroidShell(runtime, ['input', 'keyevent', '67']);
+    await runAdbShell(runtime, ['input', 'keyevent', '67']);
   }
 }
 
-async function typeReplyText(runtime, reply) {
-  await runAndroidShell(runtime, ['input', 'text', escapeForAndroidInput(reply)]);
+async function inputReplyWithStrategy(runtime, reply, previousIme) {
+  const strategy = createInputStrategy(runtime);
+
+  if (!strategy.supported) {
+    return {
+      ...failureResult(
+        strategy.unsupportedCode || 'SEND_INPUT_METHOD_UNSUPPORTED',
+        'precheck',
+        false,
+        strategy.unsupportedMessage || 'Android input strategy is unsupported'
+      ),
+      previousIme
+    };
+  }
+
+  const availability = await strategy.checkAvailability();
+  if (!availability.success) {
+    return {
+      ...availability,
+      previousIme
+    };
+  }
+
+  try {
+    await strategy.enterText(reply);
+
+    return {
+      success: true,
+      failureCode: '',
+      failureStage: '',
+      retryable: false,
+      previousIme
+    };
+  } catch (error) {
+    return {
+      ...failureResult(
+        strategy.writeFailureCode || 'SEND_INPUT_WRITE_FAILED',
+        'input',
+        true,
+        error.message
+      ),
+      previousIme
+    };
+  }
+
+  if (!runtime.adbKeyboardEnabled) {
+    return failureResult(
+      'SEND_INPUT_METHOD_NOT_AVAILABLE',
+      'precheck',
+      false,
+      'ADB Keyboard 输入方案未启用'
+    );
+  }
+
+  try {
+    await switchInputMethod(runtime, runtime.adbKeyboardIme);
+    await clearAdbKeyboardText(runtime);
+    await sendAdbKeyboardText(runtime, reply);
+
+    return {
+      success: true,
+      failureCode: '',
+      failureStage: '',
+      retryable: false,
+      previousIme
+    };
+  } catch (error) {
+    return {
+      ...failureResult(
+        'SEND_INPUT_WRITE_FAILED',
+        'input',
+        true,
+        error.message
+      ),
+      previousIme
+    };
+  }
 }
 
 async function confirmSendSuccess(runtime, reply, beforeContext) {
@@ -342,17 +539,186 @@ function areMessagesHighlySimilar(left, right) {
   );
 }
 
-function escapeForAndroidInput(value) {
-  return String(value)
-    .replace(/ /g, '%s')
-    .replace(/([()<>|;&*~"'\\$`])/g, '\\$1');
+async function switchInputMethod(runtime, imeId) {
+  await runAdbShell(runtime, ['ime', 'set', imeId]);
 }
 
-async function runAndroidShell(runtime, args) {
+async function restoreInputMethod(runtime, imeId) {
+  if (!imeId || imeId === runtime.adbKeyboardIme) {
+    return restoreSuccess();
+  }
+
+  try {
+    await switchInputMethod(runtime, imeId);
+    return restoreSuccess();
+  } catch (error) {
+    logger.warn(`恢复输入法失败: ${error.message}`);
+  }
+}
+
+async function readCurrentInputMethod(runtime) {
+  const result = await runAdbShell(runtime, [
+    'settings',
+    'get',
+    'secure',
+    'default_input_method'
+  ]);
+
+  return result.stdout.trim();
+}
+
+async function clearAdbKeyboardText(runtime) {
+  await runAdbShell(runtime, ['am', 'broadcast', '-a', 'ADB_CLEAR_TEXT']);
+}
+
+async function sendAdbKeyboardText(runtime, value) {
+  const base64 = Buffer.from(String(value), 'utf8').toString('base64');
+  await runAdbShell(runtime, [
+    'am',
+    'broadcast',
+    '-a',
+    'ADB_INPUT_B64',
+    '--es',
+    'msg',
+    base64
+  ]);
+}
+
+function failureResult(code, stage, retryable, message = '') {
+  return {
+    success: false,
+    failureCode: code,
+    failureStage: stage,
+    retryable,
+    message
+  };
+}
+
+function restoreSuccess() {
+  return {
+    success: true,
+    failureCode: '',
+    failureStage: '',
+    retryable: false
+  };
+}
+
+function detectInputStrategy(runtime) {
+  const strategy = createInputStrategy(runtime);
+
+  if (!strategy.supported) {
+    return Promise.resolve(
+      failureResult(
+        strategy.unsupportedCode || 'SEND_INPUT_METHOD_UNSUPPORTED',
+        'precheck',
+        false,
+        strategy.unsupportedMessage || 'Android input strategy is unsupported'
+      )
+    );
+  }
+
+  return strategy.checkAvailability();
+}
+
+function createInputStrategy(runtime) {
+  if (runtime.inputStrategy === androidInputStrategyCodes.adbKeyboard) {
+    return createAdbKeyboardStrategy(runtime);
+  }
+
+  return {
+    supported: false,
+    unsupportedCode: 'SEND_INPUT_METHOD_UNSUPPORTED',
+    unsupportedMessage: `Unsupported Android input strategy: ${runtime.inputStrategy || 'unknown'}`
+  };
+}
+
+function createAdbKeyboardStrategy(runtime) {
+  return {
+    code: androidInputStrategyCodes.adbKeyboard,
+    supported: true,
+    writeFailureCode: 'SEND_INPUT_WRITE_FAILED',
+    async checkAvailability() {
+      if (!runtime.adbKeyboardEnabled) {
+        return failureResult(
+          'SEND_INPUT_METHOD_UNAVAILABLE',
+          'precheck',
+          false,
+          'ADB Keyboard input strategy is disabled'
+        );
+      }
+
+      const imeId = runtime.adbKeyboardIme;
+
+      try {
+        const imeList = await runAdbShell(runtime, ['ime', 'list', '-s']);
+        const installedImes = imeList.stdout
+          .split(/\r?\n/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+        if (!installedImes.includes(imeId)) {
+          return failureResult(
+            'SEND_INPUT_METHOD_UNAVAILABLE',
+            'precheck',
+            false,
+            `ADB Keyboard IME not detected: ${imeId}`
+          );
+        }
+
+        await runAdbShell(runtime, ['ime', 'enable', imeId]);
+        const currentIme = await readCurrentInputMethod(runtime);
+
+        return {
+          success: true,
+          failureCode: '',
+          failureStage: '',
+          retryable: false,
+          currentIme,
+          strategy: this.code
+        };
+      } catch (error) {
+        return failureResult(
+          'SEND_INPUT_METHOD_UNAVAILABLE',
+          'precheck',
+          false,
+          error.message
+        );
+      }
+    },
+    async enterText(reply) {
+      await switchInputMethod(runtime, runtime.adbKeyboardIme);
+      await clearAdbKeyboardText(runtime);
+      await sendAdbKeyboardText(runtime, reply);
+    }
+  };
+}
+
+export const __test = {
+  createInputStrategy,
+  detectInputStrategy,
+  inputReplyWithStrategy,
+  restoreInputMethod,
+  setAdbCommandRunner(runner) {
+    adbCommandRunner = runner;
+  },
+  resetAdbCommandRunner() {
+    adbCommandRunner = defaultAdbCommandRunner;
+  }
+};
+
+async function runAdbShell(runtime, args) {
+  return runAdbCommand(runtime, ['shell', ...args]);
+}
+
+async function runAdbCommand(runtime, args) {
+  return adbCommandRunner(runtime, args);
+}
+
+async function defaultAdbCommandRunner(runtime, args) {
   const baseArgs = runtime.deviceId ? ['-s', runtime.deviceId] : [];
 
   try {
-    await execFile(runtime.adbPath, [...baseArgs, 'shell', ...args], {
+    return await execFile(runtime.adbPath, [...baseArgs, ...args], {
       windowsHide: true,
       maxBuffer: 10 * 1024 * 1024
     });

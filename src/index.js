@@ -178,11 +178,7 @@ async function handleConversation(
         messageHash,
         reply,
         mode: 'manual-review',
-        sendState: {
-          result: 'skipped',
-          attemptedAt: '',
-          failureCode: ''
-        }
+        sendState: createSendState()
       });
       return;
     }
@@ -200,24 +196,20 @@ async function handleConversation(
 
     let delivery = '仅生成';
     let mode = 'draft-only';
-    let sendState = {
-      result: 'skipped',
-      attemptedAt: '',
-      failureCode: ''
-    };
+    let sendState = createSendState();
 
     if (autoSendDecision.allowed) {
       sendState.attemptedAt = nowIso();
+      const sendResult = await channel.sendReply(runtime, reply);
 
-      try {
-        await channel.sendReply(runtime, reply);
-        delivery = '已自动发送';
-        mode = 'auto-send';
-        sendState.result = 'success';
-      } catch (sendError) {
-        const failureCode = sendError.code || 'SEND_FAILED';
+      if (!sendResult?.success) {
+        const failureCode = sendResult?.failureCode || 'SEND_FAILED';
+        const failureStage = sendResult?.failureStage || 'send';
+
         logger.error(
-          `自动发送失败: ${context.title} - ${failureCode}: ${sendError.message}`
+          `自动发送失败: ${context.title} - ${failureCode} @ ${failureStage}: ${
+            sendResult?.message || 'unknown'
+          }`
         );
         await safeNotify(
           formatConversationNotification({
@@ -225,7 +217,7 @@ async function handleConversation(
             latestMessage: replyContext.latestMessage,
             reply,
             outcome: '转人工',
-            reason: `自动发送失败: ${failureCode}`
+            reason: `自动发送失败: ${failureCode} @ ${failureStage}`
           }),
           '自动发送失败通知'
         );
@@ -243,6 +235,10 @@ async function handleConversation(
         });
         return;
       }
+
+      delivery = '已自动发送';
+      mode = 'auto-send';
+      sendState.result = 'success';
     } else if (config.xiaohongshu.autoSendReply) {
       logger.info(
         `自动发送未命中前置条件，退化为草稿通知: ${context.title} - ${autoSendDecision.code}`
@@ -310,6 +306,14 @@ function buildObservedConversationRecord({ record, context, mode }) {
     ...record,
     lastContextMessages: [...(context.history || [])],
     mode: mode ?? record?.mode
+  };
+}
+
+function createSendState() {
+  return {
+    result: 'skipped',
+    attemptedAt: '',
+    failureCode: ''
   };
 }
 

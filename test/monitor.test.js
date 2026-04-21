@@ -318,6 +318,12 @@ test('monitorOnce auto-sends on low-risk conversation when enabled', async () =>
     },
     async sendReply(_runtime, reply) {
       sentReplies.push(reply);
+      return {
+        success: true,
+        failureCode: '',
+        failureStage: '',
+        retryable: false
+      };
     }
   };
 
@@ -393,9 +399,13 @@ test('monitorOnce falls back to manual notification when auto-send fails', async
       return { title: 'A', latestMessage: '你好', history: ['你好'] };
     },
     async sendReply() {
-      const error = new Error('missing input');
-      error.code = 'SEND_INPUT_NOT_FOUND';
-      throw error;
+      return {
+        success: false,
+        failureCode: 'SEND_INPUT_METHOD_NOT_AVAILABLE',
+        failureStage: 'precheck',
+        retryable: false,
+        message: 'adb keyboard missing'
+      };
     }
   };
 
@@ -443,6 +453,6 @@ test('monitorOnce falls back to manual notification when auto-send fails', async
   const record = Object.values(state.conversations)[0];
   assert.equal(record.mode, 'auto-send-failed');
   assert.equal(record.lastSendResult, 'failed');
-  assert.equal(record.lastSendFailureCode, 'SEND_INPUT_NOT_FOUND');
+  assert.equal(record.lastSendFailureCode, 'SEND_INPUT_METHOD_NOT_AVAILABLE');
   assert.equal(notifications.length, 1);
 });
